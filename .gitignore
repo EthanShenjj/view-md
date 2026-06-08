@@ -1,0 +1,10 @@
+node_modules
+out
+out-tsc
+dist
+release
+.DS_Store
+*.log
+*.tsbuildinfo
+coverage
+.vite
