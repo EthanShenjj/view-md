@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -32,19 +32,51 @@ describe('App', () => {
     localStorage.clear()
   })
 
-  it('opens a Markdown file and switches to HTML preview', async () => {
+  it('opens a Markdown file and switches to preview-only mode', async () => {
     const user = userEvent.setup()
     const api = createApi()
 
     render(<App api={api} />)
 
-    await user.click(screen.getByRole('button', { name: /open markdown/i }))
+    await user.click(screen.getByRole('button', { name: /new document/i }))
     expect(await screen.findByRole('heading', { name: 'Hello' })).toBeInTheDocument()
     expect(screen.getByLabelText(/original markdown source/i)).toHaveValue('# Hello\n\nWorld')
 
-    await user.click(screen.getByRole('button', { name: /html preview/i }))
-    expect(screen.getByTitle(/generated html preview/i)).toBeInTheDocument()
-    expect(screen.queryByLabelText(/generated html source/i)).not.toBeInTheDocument()
+    await user.click(
+      within(screen.getByLabelText(/document view/i)).getByRole('button', { name: /^preview$/i })
+    )
+    expect(screen.getByRole('heading', { name: 'Hello' })).toBeInTheDocument()
+    expect(screen.queryByLabelText(/original markdown source/i)).not.toBeInTheDocument()
+  })
+
+  it('switches between Markdown and HTML preview inside preview mode', async () => {
+    const user = userEvent.setup()
+    const api = createApi()
+
+    render(<App api={api} />)
+
+    await user.click(screen.getByRole('button', { name: /new document/i }))
+    await screen.findByRole('heading', { name: 'Hello' })
+
+    const documentView = screen.getByLabelText(/document view/i)
+    expect(within(documentView).queryByRole('button', { name: /^html$/i })).not.toBeInTheDocument()
+
+    await user.click(within(documentView).getByRole('button', { name: /^preview$/i }))
+
+    const preview = screen.getByRole('region', { name: /^preview$/i })
+    expect(within(preview).getByRole('button', { name: /markdown preview/i })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+
+    await user.click(within(preview).getByRole('button', { name: /html preview/i }))
+
+    expect(within(preview).getByRole('button', { name: /html preview/i })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+    expect(screen.getByTitle('HTML Preview')).toBeInTheDocument()
+    expect(within(preview).queryByRole('heading', { name: 'Hello' })).not.toBeInTheDocument()
   })
 
   it('stores recent files and reopens them from the sidebar', async () => {
@@ -53,7 +85,7 @@ describe('App', () => {
 
     render(<App api={api} />)
 
-    await user.click(screen.getByRole('button', { name: /open markdown/i }))
+    await user.click(screen.getByRole('button', { name: /new document/i }))
     await screen.findByRole('heading', { name: 'Hello' })
 
     await user.click(screen.getByRole('button', { name: /readme.md/i }))
