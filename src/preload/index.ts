@@ -5,6 +5,8 @@ const api: MarkdownViewerApi = {
   openMarkdownFile: () => ipcRenderer.invoke('markdown:open-file'),
   loadMarkdownPath: (path: string) => ipcRenderer.invoke('markdown:load-path', path),
   copyHtml: (html: string) => ipcRenderer.invoke('markdown:copy-html', html),
+  exportHtml: (payload) => ipcRenderer.invoke('markdown:export-html', payload),
+  exportPdf: (payload) => ipcRenderer.invoke('markdown:export-pdf', payload),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   onFileChanged: (callback: (payload: FilePayload) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: FilePayload) => callback(payload)

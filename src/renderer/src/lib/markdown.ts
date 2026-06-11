@@ -56,6 +56,35 @@ function dirname(filePath: string): string {
   return lastSlash > 0 ? normalized.slice(0, lastSlash) : normalized
 }
 
+function slugifyHeading(title: string): string {
+  return title
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}\s-]/gu, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'heading'
+}
+
+function addHeadingIds(html: string): string {
+  if (typeof document === 'undefined') {
+    return html
+  }
+
+  const template = document.createElement('template')
+  const usedIds = new Map<string, number>()
+  template.innerHTML = html
+
+  template.content.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach((heading) => {
+    const baseId = slugifyHeading(heading.textContent ?? '')
+    const count = usedIds.get(baseId) ?? 0
+    usedIds.set(baseId, count + 1)
+    heading.id = count === 0 ? baseId : `${baseId}-${count}`
+  })
+
+  return template.innerHTML
+}
+
 function resolveRelativeImages(html: string, basePath?: string): string {
   if (!basePath || typeof document === 'undefined') {
     return html
@@ -86,5 +115,5 @@ export function markdownToHtml(markdown: string, options: MarkdownToHtmlOptions 
     ADD_ATTR: ['target', 'rel']
   })
 
-  return resolveRelativeImages(safeHtml, options.basePath)
+  return addHeadingIds(resolveRelativeImages(safeHtml, options.basePath))
 }

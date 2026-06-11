@@ -17,7 +17,7 @@ const answer = 42
 [OpenAI](https://openai.com)
 `)
 
-    expect(html).toContain('<h1>Title</h1>')
+    expect(html).toContain('<h1 id="title">Title</h1>')
     expect(html).toContain('<table>')
     expect(html).toContain('<code class="hljs language-ts">')
     expect(html).toContain('<a href="https://openai.com">OpenAI</a>')

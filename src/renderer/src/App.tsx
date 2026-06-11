@@ -5,20 +5,26 @@ import {
   Clipboard,
   Code2,
   Columns2,
+  Download,
+  FileDown,
   FileText,
   FolderOpen,
   HelpCircle,
   Home,
   Lightbulb,
+  ListTree,
   MessageSquare,
   Plus,
   Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Search,
   Settings,
   SlidersHorizontal,
   Star,
-  Trash2
+  Trash2,
+  X
 } from 'lucide-react'
 
 import { markdownToHtml } from './lib/markdown'
@@ -27,6 +33,7 @@ import type { FilePayload, MarkdownViewerApi } from '../../preload/types'
 type ViewMode = 'editor' | 'preview' | 'split'
 type PreviewMode = 'markdown' | 'html'
 type LoadState = 'idle' | 'loading' | 'ready' | 'error'
+type SidebarSection = 'home' | 'favorites' | 'trash' | 'settings'
 type RecentFile = {
   path: string
   name: string
@@ -34,14 +41,71 @@ type RecentFile = {
   openedAt: number
   markdown?: string
 }
+type AppSettings = {
+  autoRefresh: boolean
+  syncScroll: boolean
+  showOutline: boolean
+}
+type OutlineItem = {
+  id: string
+  level: number
+  title: string
+}
 
 type AppProps = {
   api?: MarkdownViewerApi
 }
 
 const recentFilesStorageKey = 'view-md:recent-files'
+const favoritePathsStorageKey = 'view-md:favorite-paths'
+const trashedPathsStorageKey = 'view-md:trashed-paths'
+const settingsStorageKey = 'view-md:settings'
 const maxRecentFiles = 12
 const maxCachedMarkdownLength = 500_000
+const splitDividerWidth = 7
+const minEditorPaneWidth = 300
+const minPreviewPaneWidth = 360
+const maxEditorPaneRatio = 0.62
+
+export function getAdaptiveEditorWidth(totalWidth: number, preferredWidth: number): number {
+  if (totalWidth <= 0) {
+    return preferredWidth
+  }
+
+  const availableWidth = Math.max(0, totalWidth - splitDividerWidth)
+  const maxWidthByPreview = availableWidth - minPreviewPaneWidth
+  const maxWidthByRatio = Math.floor(availableWidth * maxEditorPaneRatio)
+  const maxEditorWidth = Math.max(
+    minEditorPaneWidth,
+    Math.min(maxWidthByPreview, maxWidthByRatio)
+  )
+
+  if (preferredWidth < minEditorPaneWidth) {
+    return minEditorPaneWidth
+  }
+
+  if (preferredWidth > maxEditorWidth) {
+    return maxEditorWidth
+  }
+
+  return preferredWidth
+}
+
+function getSidebarLayoutWidth(totalWidth: number, isCollapsed: boolean): number {
+  if (totalWidth <= 1020) {
+    return 86
+  }
+
+  if (isCollapsed) {
+    return 76
+  }
+
+  if (totalWidth <= 1180) {
+    return 232
+  }
+
+  return 260
+}
 
 const browserFallbackApi: MarkdownViewerApi = {
   openMarkdownFile: async () => {
@@ -52,6 +116,20 @@ const browserFallbackApi: MarkdownViewerApi = {
   },
   copyHtml: async (html: string) => {
     await navigator.clipboard.writeText(html)
+  },
+  exportHtml: async ({ name, html }) => {
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = name.replace(/\.(md|markdown)$/i, '.html') || 'markdown-preview.html'
+    anchor.click()
+    URL.revokeObjectURL(url)
+    return anchor.download
+  },
+  exportPdf: async () => {
+    window.print()
+    return null
   },
   getPathForFile: () => '',
   onFileChanged: () => () => undefined,
@@ -153,6 +231,73 @@ function writeRecentFiles(recentFiles: RecentFile[]): void {
   localStorage.setItem(recentFilesStorageKey, JSON.stringify(recentFiles))
 }
 
+function readStringSet(storageKey: string): Set<string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(storageKey) ?? '[]') as unknown
+    if (!Array.isArray(parsed)) {
+      return new Set()
+    }
+    return new Set(parsed.filter((item): item is string => typeof item === 'string'))
+  } catch {
+    return new Set()
+  }
+}
+
+function writeStringSet(storageKey: string, values: Set<string>): void {
+  localStorage.setItem(storageKey, JSON.stringify([...values]))
+}
+
+function readAppSettings(): AppSettings {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(settingsStorageKey) ?? '{}') as Partial<AppSettings>
+    return {
+      autoRefresh: parsed.autoRefresh ?? false,
+      syncScroll: parsed.syncScroll ?? true,
+      showOutline: parsed.showOutline ?? true
+    }
+  } catch {
+    return {
+      autoRefresh: false,
+      syncScroll: true,
+      showOutline: true
+    }
+  }
+}
+
+function writeAppSettings(settings: AppSettings): void {
+  localStorage.setItem(settingsStorageKey, JSON.stringify(settings))
+}
+
+function slugifyHeading(title: string): string {
+  return title
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}\s-]/gu, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'heading'
+}
+
+function parseMarkdownOutline(markdown: string): OutlineItem[] {
+  const usedIds = new Map<string, number>()
+
+  return markdown
+    .split('\n')
+    .map((line) => line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/))
+    .filter((match): match is RegExpMatchArray => Boolean(match))
+    .map((match) => {
+      const baseId = slugifyHeading(match[2].replace(/[*_`[\]()]/g, '').trim())
+      const count = usedIds.get(baseId) ?? 0
+      usedIds.set(baseId, count + 1)
+
+      return {
+        id: count === 0 ? baseId : `${baseId}-${count}`,
+        level: match[1].length,
+        title: match[2].replace(/[*_`]/g, '').trim()
+      }
+    })
+}
+
 async function readBrowserMarkdownFile(file: File): Promise<FilePayload> {
   if (!isMarkdownFile(file)) {
     throw new Error('Choose a .md or .markdown file.')
@@ -179,7 +324,16 @@ export function App({ api }: AppProps) {
   const [isDragging, setIsDragging] = useState(false)
   const [recentFiles, setRecentFiles] = useState<RecentFile[]>(() => readRecentFiles())
   const [recentQuery, setRecentQuery] = useState('')
+  const [activeSection, setActiveSection] = useState<SidebarSection>('home')
+  const [favoritePaths, setFavoritePaths] = useState<Set<string>>(() => readStringSet(favoritePathsStorageKey))
+  const [trashedPaths, setTrashedPaths] = useState<Set<string>>(() => readStringSet(trashedPathsStorageKey))
+  const [settings, setSettings] = useState<AppSettings>(() => readAppSettings())
+  const [pendingFileChange, setPendingFileChange] = useState<FilePayload | null>(null)
+  const [exportMessage, setExportMessage] = useState<string | null>(null)
   const htmlRef = useRef('')
+  const sourceTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const previewContentRef = useRef<HTMLDivElement>(null)
+  const isSyncingScroll = useRef(false)
 
   const appShellRef = useRef<HTMLDivElement>(null)
   const splitViewRef = useRef<HTMLDivElement>(null)
@@ -212,17 +366,7 @@ export function App({ api }: AppProps) {
       const deltaX = event.clientX - dragStartInfo.current.startX
       let nextWidth = dragStartInfo.current.startWidth + deltaX
 
-      const minEditorWidth = 320
-      const minPreviewWidth = 360
-      const maxEditorWidth = totalWidth - minPreviewWidth - 8
-
-      if (nextWidth < minEditorWidth) {
-        nextWidth = minEditorWidth
-      } else if (nextWidth > maxEditorWidth) {
-        nextWidth = maxEditorWidth
-      }
-
-      setEditorWidth(nextWidth)
+      setEditorWidth(getAdaptiveEditorWidth(totalWidth, nextWidth))
     }
 
     const handleMouseUp = () => {
@@ -250,15 +394,8 @@ export function App({ api }: AppProps) {
       const entry = entries[0]
       if (!entry) return
       const totalWidth = entry.contentRect.width
-      const minPreviewWidth = 360
-      const minEditorWidth = 320
-      const maxEditorWidth = totalWidth - minPreviewWidth - 8
-
       setEditorWidth((currentWidth) => {
-        if (currentWidth > maxEditorWidth) {
-          return Math.max(minEditorWidth, maxEditorWidth)
-        }
-        return currentWidth
+        return getAdaptiveEditorWidth(totalWidth, currentWidth)
       })
     })
 
@@ -266,9 +403,10 @@ export function App({ api }: AppProps) {
     return () => observer.disconnect()
   }, [viewMode])
 
-  const [recentWidth, setRecentWidth] = useState(375)
-  const [isRecentCollapsed, setIsRecentCollapsed] = useState(false)
+  const [recentWidth, setRecentWidth] = useState(300)
+  const [isRecentCollapsed, setIsRecentCollapsed] = useState(() => readRecentFiles().length === 0)
   const [isDraggingRecent, setIsDraggingRecent] = useState(false)
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const recentDragStartInfo = useRef({ startX: 0, startWidth: 0 })
 
   const startDraggingRecent = useCallback((event: React.MouseEvent) => {
@@ -295,12 +433,7 @@ export function App({ api }: AppProps) {
       }
 
       const totalWidth = appShellRef.current.getBoundingClientRect().width
-      let sidebarWidth = 325
-      if (totalWidth <= 820) {
-        sidebarWidth = 86
-      } else if (totalWidth <= 1180) {
-        sidebarWidth = 280
-      }
+      const sidebarWidth = getSidebarLayoutWidth(totalWidth, isSidebarCollapsed)
 
       const deltaX = event.clientX - recentDragStartInfo.current.startX
       let nextWidth = recentDragStartInfo.current.startWidth + deltaX
@@ -332,7 +465,7 @@ export function App({ api }: AppProps) {
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [isDraggingRecent])
+  }, [isDraggingRecent, isSidebarCollapsed])
 
   useEffect(() => {
     if (!appShellRef.current) {
@@ -348,14 +481,8 @@ export function App({ api }: AppProps) {
 
       const totalWidth = entry.contentRect.width
 
-      let sidebarWidth = 325
-      let isMobile = false
-      if (totalWidth <= 820) {
-        sidebarWidth = 86
-        isMobile = true
-      } else if (totalWidth <= 1180) {
-        sidebarWidth = 280
-      }
+      const sidebarWidth = getSidebarLayoutWidth(totalWidth, isSidebarCollapsed)
+      const isMobile = totalWidth <= 1020
 
       const minWorkspaceWidth = 400
       const minRecentWidth = 180
@@ -377,7 +504,7 @@ export function App({ api }: AppProps) {
 
     observer.observe(appShellRef.current)
     return () => observer.disconnect()
-  }, [isRecentCollapsed])
+  }, [isRecentCollapsed, isSidebarCollapsed])
 
   const html = useMemo(() => {
     if (!file) {
@@ -387,20 +514,48 @@ export function App({ api }: AppProps) {
     return markdownToHtml(file.markdown, { basePath: file.path })
   }, [file])
 
+  const outline = useMemo(() => {
+    return file ? parseMarkdownOutline(file.markdown) : []
+  }, [file])
+
   const filteredRecentFiles = useMemo(() => {
     const normalizedQuery = recentQuery.trim().toLowerCase()
+    const sectionFiles = recentFiles.filter((recentFile) => {
+      const isTrashed = trashedPaths.has(recentFile.path)
+
+      if (activeSection === 'trash') {
+        return isTrashed
+      }
+
+      if (isTrashed) {
+        return false
+      }
+
+      if (activeSection === 'favorites') {
+        return favoritePaths.has(recentFile.path)
+      }
+
+      return true
+    })
 
     if (!normalizedQuery) {
-      return recentFiles
+      return sectionFiles
     }
 
-    return recentFiles.filter((recentFile) => {
+    return sectionFiles.filter((recentFile) => {
       return (
         recentFile.name.toLowerCase().includes(normalizedQuery) ||
-        recentFile.path.toLowerCase().includes(normalizedQuery)
+        recentFile.path.toLowerCase().includes(normalizedQuery) ||
+        getRecentDescription(recentFile).toLowerCase().includes(normalizedQuery)
       )
     })
-  }, [recentFiles, recentQuery])
+  }, [activeSection, favoritePaths, recentFiles, recentQuery, trashedPaths])
+
+  const recentSectionTitle = activeSection === 'favorites'
+    ? 'Favorite documents'
+    : activeSection === 'trash'
+      ? 'Trash'
+      : 'Recent documents'
 
   htmlRef.current = html
 
@@ -423,6 +578,7 @@ export function App({ api }: AppProps) {
         ].slice(0, maxRecentFiles)
 
         writeRecentFiles(nextRecentFiles)
+        setIsRecentCollapsed(false)
         return nextRecentFiles
       })
     },
@@ -435,6 +591,16 @@ export function App({ api }: AppProps) {
       setLoadState('ready')
       setError(null)
       setCopied(false)
+      setPendingFileChange(null)
+      setTrashedPaths((currentPaths) => {
+        if (!currentPaths.has(payload.path)) {
+          return currentPaths
+        }
+        const nextPaths = new Set(currentPaths)
+        nextPaths.delete(payload.path)
+        writeStringSet(trashedPathsStorageKey, nextPaths)
+        return nextPaths
+      })
       rememberFile(payload)
     },
     [rememberFile]
@@ -443,6 +609,70 @@ export function App({ api }: AppProps) {
   const clearRecentFiles = useCallback(() => {
     setRecentFiles([])
     writeRecentFiles([])
+    setIsRecentCollapsed(true)
+  }, [])
+
+  const toggleFavorite = useCallback((path: string) => {
+    setFavoritePaths((currentPaths) => {
+      const nextPaths = new Set(currentPaths)
+      if (nextPaths.has(path)) {
+        nextPaths.delete(path)
+      } else {
+        nextPaths.add(path)
+      }
+      writeStringSet(favoritePathsStorageKey, nextPaths)
+      return nextPaths
+    })
+  }, [])
+
+  const moveToTrash = useCallback((path: string) => {
+    setTrashedPaths((currentPaths) => {
+      const nextPaths = new Set(currentPaths)
+      nextPaths.add(path)
+      writeStringSet(trashedPathsStorageKey, nextPaths)
+      return nextPaths
+    })
+    if (file?.path === path) {
+      setFile(null)
+      setLoadState('idle')
+    }
+  }, [file])
+
+  const restoreFromTrash = useCallback((path: string) => {
+    setTrashedPaths((currentPaths) => {
+      const nextPaths = new Set(currentPaths)
+      nextPaths.delete(path)
+      writeStringSet(trashedPathsStorageKey, nextPaths)
+      return nextPaths
+    })
+  }, [])
+
+  const permanentlyRemoveRecent = useCallback((path: string) => {
+    setRecentFiles((currentRecentFiles) => {
+      const nextRecentFiles = currentRecentFiles.filter((recentFile) => recentFile.path !== path)
+      writeRecentFiles(nextRecentFiles)
+      return nextRecentFiles
+    })
+    setFavoritePaths((currentPaths) => {
+      const nextPaths = new Set(currentPaths)
+      nextPaths.delete(path)
+      writeStringSet(favoritePathsStorageKey, nextPaths)
+      return nextPaths
+    })
+    setTrashedPaths((currentPaths) => {
+      const nextPaths = new Set(currentPaths)
+      nextPaths.delete(path)
+      writeStringSet(trashedPathsStorageKey, nextPaths)
+      return nextPaths
+    })
+  }, [])
+
+  const updateSetting = useCallback((key: keyof AppSettings, value: boolean) => {
+    setSettings((currentSettings) => {
+      const nextSettings = { ...currentSettings, [key]: value }
+      writeAppSettings(nextSettings)
+      return nextSettings
+    })
   }, [])
 
   const openRecentFile = useCallback(
@@ -529,9 +759,44 @@ export function App({ api }: AppProps) {
     window.setTimeout(() => setCopied(false), 1200)
   }, [runtimeApi])
 
+  const exportHtml = useCallback(async () => {
+    if (!file || !htmlRef.current) {
+      return
+    }
+
+    const savedPath = await runtimeApi.exportHtml({ name: file.name, html: htmlRef.current })
+    setExportMessage(savedPath ? `Exported HTML to ${savedPath}` : 'HTML export canceled')
+    window.setTimeout(() => setExportMessage(null), 2200)
+  }, [file, runtimeApi])
+
+  const exportPdf = useCallback(async () => {
+    if (!file || !htmlRef.current) {
+      return
+    }
+
+    const savedPath = await runtimeApi.exportPdf({ name: file.name, html: htmlRef.current })
+    setExportMessage(savedPath ? `Exported PDF to ${savedPath}` : 'PDF export canceled')
+    window.setTimeout(() => setExportMessage(null), 2200)
+  }, [file, runtimeApi])
+
+  const applyPendingFileChange = useCallback(() => {
+    if (!pendingFileChange) {
+      return
+    }
+
+    acceptPayload(pendingFileChange)
+    setPendingFileChange(null)
+  }, [acceptPayload, pendingFileChange])
+
   useEffect(() => {
     const unsubscribeChanged = runtimeApi.onFileChanged((payload) => {
-      acceptPayload(payload)
+      if (settings.autoRefresh) {
+        acceptPayload(payload)
+        setPendingFileChange(null)
+        return
+      }
+
+      setPendingFileChange(payload)
     })
     const unsubscribeOpened = runtimeApi.onOpenFile((payload) => {
       acceptPayload(payload)
@@ -551,7 +816,45 @@ export function App({ api }: AppProps) {
       unsubscribeOpened()
       unsubscribeCommand()
     }
-  }, [acceptPayload, runtimeApi, copyHtml])
+  }, [acceptPayload, runtimeApi, copyHtml, settings.autoRefresh])
+
+  const syncPreviewScroll = useCallback((sourceElement: HTMLTextAreaElement) => {
+    if (!settings.syncScroll || isSyncingScroll.current || !previewContentRef.current) {
+      return
+    }
+
+    const maxSourceScroll = sourceElement.scrollHeight - sourceElement.clientHeight
+    const maxPreviewScroll = previewContentRef.current.scrollHeight - previewContentRef.current.clientHeight
+
+    if (maxSourceScroll <= 0 || maxPreviewScroll <= 0) {
+      return
+    }
+
+    isSyncingScroll.current = true
+    previewContentRef.current.scrollTop = (sourceElement.scrollTop / maxSourceScroll) * maxPreviewScroll
+    window.requestAnimationFrame(() => {
+      isSyncingScroll.current = false
+    })
+  }, [settings.syncScroll])
+
+  const syncSourceScroll = useCallback((previewElement: HTMLDivElement) => {
+    if (!settings.syncScroll || isSyncingScroll.current || !sourceTextareaRef.current) {
+      return
+    }
+
+    const maxPreviewScroll = previewElement.scrollHeight - previewElement.clientHeight
+    const maxSourceScroll = sourceTextareaRef.current.scrollHeight - sourceTextareaRef.current.clientHeight
+
+    if (maxPreviewScroll <= 0 || maxSourceScroll <= 0) {
+      return
+    }
+
+    isSyncingScroll.current = true
+    sourceTextareaRef.current.scrollTop = (previewElement.scrollTop / maxPreviewScroll) * maxSourceScroll
+    window.requestAnimationFrame(() => {
+      isSyncingScroll.current = false
+    })
+  }, [settings.syncScroll])
 
   const handleDrop = useCallback(
     async (event: DragEvent<HTMLDivElement>) => {
@@ -592,7 +895,7 @@ export function App({ api }: AppProps) {
   return (
     <main
       ref={appShellRef}
-      className={`app-shell ${isDragging ? 'is-dragging' : ''} ${isDraggingRecent ? 'is-dragging-recent' : ''} ${isRecentCollapsed ? 'recent-collapsed' : ''}`}
+      className={`app-shell ${isDragging ? 'is-dragging' : ''} ${isDraggingRecent ? 'is-dragging-recent' : ''} ${isRecentCollapsed ? 'recent-collapsed' : ''} ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}
       style={{
         '--recent-width': `${recentWidth}px`
       } as React.CSSProperties}
@@ -623,6 +926,20 @@ export function App({ api }: AppProps) {
             <div className="app-name">Markdown Reader</div>
             <div className="app-subtitle">Personal workspace</div>
           </div>
+          <button
+            className="sidebar-collapse-button"
+            type="button"
+            title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-pressed={isSidebarCollapsed}
+            onClick={() => setIsSidebarCollapsed((collapsed) => !collapsed)}
+          >
+            {isSidebarCollapsed ? (
+              <PanelLeftOpen aria-hidden="true" size={17} />
+            ) : (
+              <PanelLeftClose aria-hidden="true" size={17} />
+            )}
+          </button>
         </div>
 
         <button className="sidebar-primary" type="button" onClick={openFile}>
@@ -636,9 +953,12 @@ export function App({ api }: AppProps) {
 
         <nav className="sidebar-nav" aria-label="Workspace">
           <button
-            className="sidebar-nav-item active"
+            className={`sidebar-nav-item ${activeSection === 'home' ? 'active' : ''}`}
             type="button"
-            onClick={() => setIsRecentCollapsed(false)}
+            onClick={() => {
+              setActiveSection('home')
+              setIsRecentCollapsed(false)
+            }}
           >
             <Home aria-hidden="true" size={19} />
             <span>Home</span>
@@ -654,15 +974,36 @@ export function App({ api }: AppProps) {
             <FolderOpen aria-hidden="true" size={19} />
             <span>All files</span>
           </button>
-          <button className="sidebar-nav-item" type="button">
+          <button
+            className={`sidebar-nav-item ${activeSection === 'favorites' ? 'active' : ''}`}
+            type="button"
+            onClick={() => {
+              setActiveSection('favorites')
+              setIsRecentCollapsed(false)
+            }}
+          >
             <Star aria-hidden="true" size={19} />
             <span>Favorites</span>
           </button>
-          <button className="sidebar-nav-item" type="button">
+          <button
+            className={`sidebar-nav-item ${activeSection === 'trash' ? 'active' : ''}`}
+            type="button"
+            onClick={() => {
+              setActiveSection('trash')
+              setIsRecentCollapsed(false)
+            }}
+          >
             <Trash2 aria-hidden="true" size={18} />
             <span>Trash</span>
           </button>
-          <button className="sidebar-nav-item" type="button">
+          <button
+            className={`sidebar-nav-item ${activeSection === 'settings' ? 'active' : ''}`}
+            type="button"
+            onClick={() => {
+              setActiveSection('settings')
+              setIsRecentCollapsed(true)
+            }}
+          >
             <Settings aria-hidden="true" size={19} />
             <span>Settings</span>
           </button>
@@ -687,8 +1028,9 @@ export function App({ api }: AppProps) {
       >
         <div className="recent-block">
           <div className="recent-header">
-            <span>Recent documents</span>
-            {recentFiles.length > 0 ? (
+            <span>{recentSectionTitle}</span>
+            <span className="recent-count">{filteredRecentFiles.length}</span>
+            {activeSection === 'home' && recentFiles.length > 0 ? (
               <button
                 className="small-icon-button"
                 type="button"
@@ -708,7 +1050,7 @@ export function App({ api }: AppProps) {
                   return (
                     <div className="recent-list-row" key={recentFile.path}>
                       <button
-                        className={`recent-file ${file?.path === recentFile.path ? 'active' : ''}`}
+                        className={`recent-file-main ${file?.path === recentFile.path ? 'active' : ''}`}
                         type="button"
                         onClick={() => openRecentFile(recentFile)}
                         title={recentFile.path}
@@ -719,11 +1061,58 @@ export function App({ api }: AppProps) {
                           <span className="recent-file-meta">{getRecentDescription(recentFile)}</span>
                         </span>
                       </button>
+                      <div className="recent-file-actions">
+                        {activeSection === 'trash' ? (
+                          <>
+                            <button
+                              className="small-icon-button"
+                              type="button"
+                              title="Restore"
+                              aria-label={`Restore ${recentFile.name}`}
+                              onClick={() => restoreFromTrash(recentFile.path)}
+                            >
+                              <RefreshCw aria-hidden="true" size={13} />
+                            </button>
+                            <button
+                              className="small-icon-button"
+                              type="button"
+                              title="Remove from recent"
+                              aria-label={`Remove ${recentFile.name}`}
+                              onClick={() => permanentlyRemoveRecent(recentFile.path)}
+                            >
+                              <X aria-hidden="true" size={14} />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              className={`small-icon-button ${favoritePaths.has(recentFile.path) ? 'is-active' : ''}`}
+                              type="button"
+                              title={favoritePaths.has(recentFile.path) ? 'Remove favorite' : 'Add favorite'}
+                              aria-label={`${favoritePaths.has(recentFile.path) ? 'Remove favorite' : 'Add favorite'} ${recentFile.name}`}
+                              onClick={() => toggleFavorite(recentFile.path)}
+                            >
+                              <Star aria-hidden="true" size={14} />
+                            </button>
+                            <button
+                              className="small-icon-button"
+                              type="button"
+                              title="Move to trash"
+                              aria-label={`Move ${recentFile.name} to trash`}
+                              onClick={() => moveToTrash(recentFile.path)}
+                            >
+                              <Trash2 aria-hidden="true" size={14} />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   )
                 })
               ) : (
-                <div className="recent-empty">No matching files</div>
+                <div className="recent-empty">
+                  {recentQuery ? 'No matching files' : `No ${recentSectionTitle.toLowerCase()} yet`}
+                </div>
               )}
             </div>
           ) : (
@@ -801,10 +1190,16 @@ export function App({ api }: AppProps) {
               {copied ? <Check aria-hidden="true" size={17} /> : <Clipboard aria-hidden="true" size={17} />}
               <span>{copied ? 'Copied' : 'Share'}</span>
             </button>
-            <button className="secondary-button" type="button" onClick={copyHtml} disabled={!file}>
-              <Code2 aria-hidden="true" size={17} />
-              <span>Export</span>
-            </button>
+            <div className="export-actions" aria-label="Export document">
+              <button className="secondary-button" type="button" onClick={exportHtml} disabled={!file}>
+                <Download aria-hidden="true" size={16} />
+                <span>HTML</span>
+              </button>
+              <button className="secondary-button" type="button" onClick={exportPdf} disabled={!file}>
+                <FileDown aria-hidden="true" size={16} />
+                <span>PDF</span>
+              </button>
+            </div>
             <div className="user-avatar" aria-label="Current user" title="Personal workspace">
               <span>MD</span>
             </div>
@@ -829,7 +1224,73 @@ export function App({ api }: AppProps) {
         </div>
 
         <div className="content-area">
-          {loadState === 'idle' && !file ? (
+          {activeSection === 'settings' ? (
+            <section className="settings-panel" aria-label="Settings">
+              <div>
+                <h1>Settings</h1>
+                <p>Workspace behavior for preview, refresh, and navigation.</p>
+              </div>
+              <label className="settings-row">
+                <span>
+                  <strong>Auto refresh changed files</strong>
+                  <small>Reload the current document when the file changes on disk.</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={settings.autoRefresh}
+                  onChange={(event) => updateSetting('autoRefresh', event.target.checked)}
+                />
+              </label>
+              <label className="settings-row">
+                <span>
+                  <strong>Sync source and preview scroll</strong>
+                  <small>Keep split panes aligned by scroll progress.</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={settings.syncScroll}
+                  onChange={(event) => updateSetting('syncScroll', event.target.checked)}
+                />
+              </label>
+              <label className="settings-row">
+                <span>
+                  <strong>Show Markdown outline</strong>
+                  <small>Display headings beside the preview when a document is open.</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={settings.showOutline}
+                  onChange={(event) => updateSetting('showOutline', event.target.checked)}
+                />
+              </label>
+            </section>
+          ) : null}
+
+          {activeSection !== 'settings' && pendingFileChange ? (
+            <div className="file-change-banner" role="status">
+              <span>This file changed on disk.</span>
+              <button className="secondary-button" type="button" onClick={applyPendingFileChange}>
+                <RefreshCw aria-hidden="true" size={15} />
+                <span>Refresh</span>
+              </button>
+              <button
+                className="small-icon-button"
+                type="button"
+                aria-label="Dismiss file change"
+                onClick={() => setPendingFileChange(null)}
+              >
+                <X aria-hidden="true" size={14} />
+              </button>
+            </div>
+          ) : null}
+
+          {activeSection !== 'settings' && exportMessage ? (
+            <div className="file-change-banner compact" role="status">
+              <span>{exportMessage}</span>
+            </div>
+          ) : null}
+
+          {activeSection !== 'settings' && loadState === 'idle' && !file ? (
             <div className="empty-state">
               <div className="empty-icon">
                 <FileText aria-hidden="true" size={38} />
@@ -845,7 +1306,7 @@ export function App({ api }: AppProps) {
             </div>
           ) : null}
 
-          {loadState === 'error' ? (
+          {activeSection !== 'settings' && loadState === 'error' ? (
             <div className="empty-state">
               <div className="empty-icon danger">
                 <RefreshCw aria-hidden="true" size={36} />
@@ -859,16 +1320,43 @@ export function App({ api }: AppProps) {
             </div>
           ) : null}
 
-          {file && loadState !== 'error' ? (
-            <div
-              ref={splitViewRef}
-              className={`split-view mode-${viewMode} ${isDraggingDivider ? 'is-dragging-divider' : ''}`}
-              style={
-                viewMode === 'split'
-                  ? { gridTemplateColumns: `${editorWidth}px auto 1fr` }
-                  : undefined
-              }
-            >
+          {activeSection !== 'settings' && file && loadState !== 'error' ? (
+            <div className={`reader-workspace ${settings.showOutline && outline.length > 0 ? 'has-outline' : ''}`}>
+              {settings.showOutline && outline.length > 0 ? (
+                <aside className="outline-panel" aria-label="Markdown outline">
+                  <div className="outline-title">
+                    <ListTree aria-hidden="true" size={15} />
+                    <span>Outline</span>
+                  </div>
+                  <div className="outline-list">
+                    {outline.map((item) => (
+                      <button
+                        key={item.id}
+                        className="outline-item"
+                        type="button"
+                        style={{ '--outline-level': item.level } as React.CSSProperties}
+                        onClick={() => {
+                          previewContentRef.current
+                            ?.querySelector(`#${CSS.escape(item.id)}`)
+                            ?.scrollIntoView({ block: 'start' })
+                        }}
+                      >
+                        {item.title}
+                      </button>
+                    ))}
+                  </div>
+                </aside>
+              ) : null}
+
+              <div
+                ref={splitViewRef}
+                className={`split-view mode-${viewMode} ${isDraggingDivider ? 'is-dragging-divider' : ''}`}
+                style={
+                  viewMode === 'split'
+                    ? { gridTemplateColumns: `${editorWidth}px auto 1fr` }
+                    : undefined
+                }
+              >
               {viewMode !== 'preview' ? (
                 <section className="source-pane" aria-label="Original Markdown">
                   <div className="pane-header">
@@ -876,12 +1364,14 @@ export function App({ api }: AppProps) {
                     <SlidersHorizontal aria-hidden="true" size={18} />
                   </div>
                   <textarea
+                    ref={sourceTextareaRef}
                     className="markdown-source"
                     value={file.markdown}
                     readOnly
                     spellCheck={false}
                     wrap="soft"
                     aria-label="Original Markdown source"
+                    onScroll={(event) => syncPreviewScroll(event.currentTarget)}
                   />
                 </section>
               ) : null}
@@ -917,7 +1407,11 @@ export function App({ api }: AppProps) {
                     </div>
                   </div>
                   {previewMode === 'markdown' ? (
-                    <div className="preview-content">
+                    <div
+                      ref={previewContentRef}
+                      className="preview-content"
+                      onScroll={(event) => syncSourceScroll(event.currentTarget)}
+                    >
                       <article className="markdown-body" dangerouslySetInnerHTML={{ __html: html }} />
                     </div>
                   ) : (
@@ -930,6 +1424,7 @@ export function App({ api }: AppProps) {
                   )}
                 </section>
               ) : null}
+              </div>
             </div>
           ) : null}
         </div>

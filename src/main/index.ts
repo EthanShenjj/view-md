@@ -1,11 +1,11 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron'
 import { createHash } from 'node:crypto'
-import { stat, readFile } from 'node:fs/promises'
+import { stat, readFile, writeFile } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { watch, type FSWatcher } from 'node:fs'
 
-import type { FilePayload } from '../preload/types.js'
+import type { ExportPayload, FilePayload } from '../preload/types.js'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const markdownExtensions = new Set(['.md', '.markdown'])
@@ -107,6 +107,108 @@ async function openMarkdownDialog(): Promise<FilePayload | null> {
   }
 
   return loadAndTrackFile(result.filePaths[0])
+}
+
+function getExportBaseName(name: string): string {
+  const trimmedName = name.trim() || 'markdown-preview'
+  const extension = extname(trimmedName)
+  return extension ? trimmedName.slice(0, -extension.length) : trimmedName
+}
+
+function buildExportHtml(payload: ExportPayload): string {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${payload.name}</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 48px;
+      color: #111419;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+    }
+    main {
+      max-width: 760px;
+      margin: 0 auto;
+    }
+    pre {
+      overflow: auto;
+      padding: 16px;
+      border: 1px solid #d8dbe0;
+      border-radius: 8px;
+      background: #f6f7f8;
+    }
+    code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+    }
+    img {
+      max-width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <main>${payload.html}</main>
+</body>
+</html>`
+}
+
+async function exportHtmlFile(payload: ExportPayload): Promise<string | null> {
+  if (!mainWindow) {
+    return null
+  }
+
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export HTML',
+    defaultPath: `${getExportBaseName(payload.name)}.html`,
+    filters: [{ name: 'HTML', extensions: ['html'] }]
+  })
+
+  if (result.canceled || !result.filePath) {
+    return null
+  }
+
+  await writeFile(result.filePath, buildExportHtml(payload), 'utf8')
+  return result.filePath
+}
+
+async function exportPdfFile(payload: ExportPayload): Promise<string | null> {
+  if (!mainWindow) {
+    return null
+  }
+
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export PDF',
+    defaultPath: `${getExportBaseName(payload.name)}.pdf`,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }]
+  })
+
+  if (result.canceled || !result.filePath) {
+    return null
+  }
+
+  const printWindow = new BrowserWindow({
+    show: false,
+    width: 900,
+    height: 1200,
+    webPreferences: {
+      sandbox: true
+    }
+  })
+
+  try {
+    await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildExportHtml(payload))}`)
+    const pdf = await printWindow.webContents.printToPDF({
+      printBackground: true,
+      pageSize: 'A4'
+    })
+    await writeFile(result.filePath, pdf)
+    return result.filePath
+  } finally {
+    printWindow.close()
+  }
 }
 
 function sendOpenedFile(payload: FilePayload): void {
@@ -229,6 +331,14 @@ ipcMain.handle('markdown:load-path', async (_event, filePath: string) => {
 
 ipcMain.handle('markdown:copy-html', async (_event, html: string) => {
   clipboard.writeText(html)
+})
+
+ipcMain.handle('markdown:export-html', async (_event, payload: ExportPayload) => {
+  return exportHtmlFile(payload)
+})
+
+ipcMain.handle('markdown:export-pdf', async (_event, payload: ExportPayload) => {
+  return exportPdfFile(payload)
 })
 
 app.on('window-all-closed', () => {
